@@ -5,9 +5,13 @@ Main file containing core ATP class code and some example utilities using ATP.
 from atp_utils import ModalityEmbeddings
 from dataclasses import dataclass
 import math
+import numpy as np
+import random
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader, TensorDataset, ConcatDataset, random_split
+from torch.utils.data.sampler import SubsetRandomSampler
 from typing import Optional
 
 
@@ -19,8 +23,8 @@ class ATPConfig:
     # ATPEncoder params
     n_layers: int = 2
     n_heads: int = 2
-    d_model: int = 128
-    d_model_ff: int = 128
+    d_model: int = 512
+    d_model_ff: int = 512
     enc_dropout: float = 0.1
     use_text_query: bool = False  # at least one use_text_* needs to be true for ATP to be multimodal
     use_text_cands: bool = False  # ^ see above. (note: if both are false, ATP is vision-only)
@@ -28,7 +32,7 @@ class ATPConfig:
     # ATPSelector params
     use_ste: bool = True  # controls type of selector during ATP training; see ATPSelectorModel.forward
     sel_dropout: float = 0.0
-    d_input: int = 512  # size of the input vision-language embeddings (e.g. CLIP-ViT-B32 is size 512)
+    d_input: int = 768  # size of the input vision-language embeddings (e.g. CLIP-ViT-B32 is size 512)
     
     @classmethod
     def from_args(cls, args):
@@ -102,6 +106,7 @@ class ATPSelectorModel(nn.Module):
         self.config = config
         self.embedding = nn.Linear(config.d_input, config.d_model)
         self.atp_encoder = ATPEncoder(config, **kwargs)
+        self.subset_sampler = SubsetOperator(90, hard=True)
         self.dropout = nn.Dropout(p=config.sel_dropout)
         self.logits = nn.Linear(config.d_model, 1)
 
@@ -145,23 +150,64 @@ class ATPSelectorModel(nn.Module):
         if self.training:
             # obtain differentiable selection mask during training.
             if self.config.use_ste:  # gumbel softmax straight-through estimator; hard selection
-                selection_mask = F.gumbel_softmax(x_logits, dim=0, hard=True)
+                selection_mask = self.subset_sampler(x_logits)
+                # selection_mask = F.gumbel_softmax(x_logits, dim=0, hard=True)
             else:  # softmax with temperature; soft selection
                 selection_mask = F.softmax(x_logits / kwargs.get("temperature", 1.0), dim=0)
         else:
             # ATP always performs hard (discrete) selection during evaluation.
-            selection_index_argmax = x_logits.max(dim=0, keepdim=True)[1]
+            selection_index_topk = torch.topk(x_logits, 90, dim=0, sorted=True)[1]
+            # selection_index_argmax = x_logits.max(dim=0, keepdim=True)[1]
             selection_mask = torch.zeros_like(x_logits, memory_format=torch.contiguous_format).scatter_(
-                dim=0, index=selection_index_argmax, value=1.0)
+                dim=0, index=selection_index_topk, value=1.0)
 
         # use mask to perform selection
-        selected_frames = (selection_mask * x_vis_seq).sum(dim=0)
+        # *** ONLY WORKS FOR BATCH SIZE OF 1 RIGHT NOW ***
+        selected_frames = (selection_mask * x_vis_seq)
+        mask = torch.abs(selected_frames).sum(dim=2) != 0
+        selected_frames = selected_frames[mask].unsqueeze(1)
         
         ret = [selected_frames, selection_mask]
         if not self.training: # extra logging during validation
             ret.append(x_logits)
         return tuple(ret)
 
+
+
+class SubsetOperator(torch.nn.Module):
+    def __init__(self, k, tau=1.0, hard=False):
+        super(SubsetOperator, self).__init__()
+        self.k = k
+        self.hard = hard
+        self.tau = tau
+        self.epsilon = np.finfo(np.float32).tiny
+
+    def forward(self, scores):
+        scores = scores.permute(1, 0, 2)
+        m = torch.distributions.gumbel.Gumbel(torch.zeros_like(scores), torch.ones_like(scores))
+        g = m.sample()
+        scores = scores + g
+
+        # continuous top k
+        khot = torch.zeros_like(scores)
+        onehot_approx = torch.zeros_like(scores)
+        for i in range(self.k):
+            khot_mask = torch.max(1.0 - onehot_approx, torch.tensor([self.epsilon]).cuda())
+            scores = scores + torch.log(khot_mask)
+            onehot_approx = torch.nn.functional.softmax(scores / self.tau, dim=1)
+            khot = khot + onehot_approx
+
+        if self.hard:
+            # straight through
+            khot_hard = torch.zeros_like(khot)
+            val, ind = torch.topk(khot, self.k, dim=1)
+            khot_hard = khot_hard.scatter_(1, ind, 1)
+            res = khot_hard - khot.detach() + khot
+        else:
+            res = khot
+
+        res = res.permute(1, 0, 2)
+        return res
 
 ######
 # Below are some utility functions (and illustrative examples) for using ATP in the context of a 
@@ -176,14 +222,14 @@ def get_selected_index_from_selection_mask(frame_idxs_gt, selection_mask, sequen
     return (selection_mask.squeeze(-1) * fidxs_gt).sum(dim=0)
 
 
-def atp_downstream_task_forward(atp_selector: ATPSelectorModel, batch, **kwargs):
+def atp_EgoSchemaQA_forward(atp_selector: ATPSelectorModel, batch, **kwargs):
     """
     Example simple function for performing forward pass over a batch input, obtaining predictions and a similarity loss.
     Modify to fit your specific task use case.
     """
-    x_vis_seq, frame_idxs_gt, x_txt_query, x_txt_cands, y_gt = batch
+    x_vis_seq, text, correct_answer_id = batch
     # note: frame_idxs_gt only here for potential visualization; not used by ATP.
-    selected_frames, *out_masks = atp_selector(x_vis_seq, x_txt_query, x_txt_cands, **kwargs)
+    selected_frames, *out_masks = atp_selector(x_vis_seq, None, None, **kwargs)
     y_pred = F.cosine_similarity(selected_frames.unsqueeze(1), x_txt_cands, dim=-1)  # (N, N_ans)
     loss = F.cross_entropy(y_pred, y_gt)
     accs = (y_pred.argmax(dim=-1) == y_gt).float()
