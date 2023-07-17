@@ -4,6 +4,7 @@ from torch.utils.data.dataloader import default_collate
 import pandas as pd
 import pickle
 import math
+import os
 import numpy as np
 import random
 
@@ -14,35 +15,62 @@ class MC_Dataset(Dataset):
         csv_path,
         subtitles_path,
         features_path,
-        max_feats=90,
+        max_feats=70,
         features_dim=512,
         tokenizer=None,
+        with_atp=False,
         use_context=True,
         type_map=None,
         prefix="",
         suffix="",
+        is_test=False,
     ):
         self.data = pd.read_csv(csv_path)
-        # if subtitles_path:
-        #     self.subs = pickle.load(open(subtitles_path, "rb"))
-        # else:
-        #     self.subs = None
         self.features_path = features_path
         self.max_feats = max_feats
         self.features_dim = features_dim
         self.mask = tokenizer.mask_token if tokenizer is not None else None
-        # self.use_context = use_context
-        # mc = 0
-        # while f"a{mc}" in self.data:
-        #     mc += 1
+        self.with_atp = with_atp
         self.mc = 5
         self.type_map = type_map
         self.prefix = prefix
         self.suffix = suffix
+        self.is_test = is_test
+
+        self.directories = ["/home/raiymbek/benchmarks/FrozenBiLM/features/batch1_90",
+                            "/home/raiymbek/benchmarks/FrozenBiLM/features/batch4.2_90",
+                            "/home/raiymbek/benchmarks/FrozenBiLM/features/batch2_90",
+                            "/home/raiymbek/benchmarks/FrozenBiLM/features/batch3_90",
+                            "/home/raiymbek/benchmarks/FrozenBiLM/features/batch4_90",
+                            "/home/raiymbek/benchmarks/FrozenBiLM/features/batch5_sample_1_90",
+                            "/home/raiymbek/benchmarks/FrozenBiLM/features/batch5_sample_2_90",
+                            "/home/raiymbek/benchmarks/FrozenBiLM/features/batch5_sample_3_90",
+                            "/home/raiymbek/benchmarks/FrozenBiLM/features/batch5_sample_4_90",
+                            "/home/raiymbek/benchmarks/FrozenBiLM/features/batch5_set_1_90",
+                            "/home/raiymbek/benchmarks/FrozenBiLM/features/batch5_set_2_90",
+                            "/home/raiymbek/benchmarks/FrozenBiLM/features/batch5_set_3_90",
+                            "/home/raiymbek/benchmarks/FrozenBiLM/features/batch5_set_4_90",
+                            "/home/raiymbek/benchmarks/FrozenBiLM/features/batch6_0_90",
+                            "/home/raiymbek/benchmarks/FrozenBiLM/features/batch6_1_90",
+                            "/home/raiymbek/benchmarks/FrozenBiLM/features/batch7_0_90",]
+
+        self.all_ans_choices = []
+        if self.is_test:
+            for idx, row in self.data.iterrows():
+                self.all_ans_choices.append(row["correct_answer"].capitalize().strip())
+                self.all_ans_choices.append(row["wrong_answer_1"].capitalize().strip())
+                self.all_ans_choices.append(row["wrong_answer_2"].capitalize().strip())
+                self.all_ans_choices.append(row["wrong_answer_3"].capitalize().strip())
+                self.all_ans_choices.append(row["wrong_answer_4"].capitalize().strip())
+            self.mc = len(self.all_ans_choices)
+
 
     def __len__(self):
         return len(self.data)
 
+    """
+    *** NOT USED ***
+    """
     def _get_subtitles(self, video_id, start, end):
         # only consider subtitles that intersec with the timestamps of the video clip
         subs_list = [
@@ -56,48 +84,34 @@ class MC_Dataset(Dataset):
         text = (
             f"{self.prefix} Question: {question} Is it '{answer}'? {mask}{self.suffix}"
         )
-        # if self.use_context:
-        #     text += f" Subtitles: {subtitles}"
         text = text.strip()
         return text
 
     def _get_video(self, video_id):
-        video = th.from_numpy(np.load(self.features_path + str(video_id) + ".npy").astype("float32"))
-        # if video_id not in self.features:
-        #     print(video_id)
-        #     video = th.zeros(1, self.features_dim)
-        # else:
-        #     if start is not None and not math.isnan(start):
-        #         video = self.features[video_id][int(start) : int(end) + 1].float()
-        #     else:
-        #         video = self.features[video_id].float()
-        #     if not len(video):
-        #         print(video_id, start, end)
-        #         video = th.zeros(1, self.features_dim)
-        # if len(video) > self.max_feats:
-        #     sampled = []
-        #     for j in range(self.max_feats):
-        #         sampled.append(video[(j * len(video)) // self.max_feats])
-        #     video = th.stack(sampled)
-        #     video_len = self.max_feats
-        # elif len(video) < self.max_feats:
-        #     video_len = len(video)
-        #     video = th.cat(
-        #         [video, th.zeros(self.max_feats - video_len, self.features_dim)], 0
-        #     )
-        # else:
-        #     video_len = self.max_feats
+        video = None
+        file_name = str(video_id).strip() + ".npy"
+        for directory in self.directories:
+            for root, dirs, files in os.walk(directory):
+                if file_name in files:
+                    video = os.path.join(root, file_name)
+                    break
+            if video is not None:
+                break
+        video = th.from_numpy(np.load(video).astype("float32"))
+        if self.with_atp:
+            video_len = 1000
+        else:
+            sampled = []
+            for j in range(self.max_feats):
+                sampled.append(video[(j * len(video)) // self.max_feats])
+            video = th.stack(sampled)
+            video_len = self.max_feats
 
-        return video, 1000
+        return video, video_len
 
     def __getitem__(self, idx):
         video_id = self.data["video_id"].values[idx]
 
-        # # get start, end
-        # start = self.data["start"].values[idx]
-        # end = self.data["end"].values[idx]
-
-        # get question
         question = self.data["question"].values[idx].capitalize().strip()
         if question[-1] != "?":
             question = str(question) + "?"
@@ -105,31 +119,18 @@ class MC_Dataset(Dataset):
         if "type" in self.data:
             type = self.data["type"].values[idx]
 
-        # # get subs
-        # if self.subs:
-        #     subs = self._get_subtitles(video_id, start, end)
-        # else:
-        #     subs = ""
-
         # get features
         video, video_len = self._get_video(video_id)
 
-        # get answer id
-        answer_id = -1  # for hidden set testing
-        # if "answer_id" in self.data:
-        #     answer_id = self.data["answer_id"].values[idx]
-
-        # text = []
-        # for i in range(self.mc):
-        #     ai = self.data[f"a{i}"].values[idx].capitalize().strip()
-        #     text.append(self._get_text(subs, ai, self.mask, question))
-
-
-        question = self.data['question'].values[idx].capitalize().strip()
         correct_answer = self.data['correct_answer'].values[idx].capitalize().strip()
-        answers = [correct_answer]
-        for i in range(4):
-            answers.append(self.data['wrong_answer_{}'.format(i + 1)].values[idx].capitalize().strip())
+        answers = []
+        if self.is_test:
+            answers = self.all_ans_choices
+        else:
+            answers = [correct_answer]
+            for i in range(4):
+                answers.append(self.data['wrong_answer_{}'.format(i + 1)].values[idx].capitalize().strip())
+
         random.shuffle(answers)
         correct_answer_id = answers.index(correct_answer)
         text = []
@@ -137,8 +138,6 @@ class MC_Dataset(Dataset):
             text.append(self._get_text(answer, self.mask, question=question))
 
         qid = idx
-        # if "qid" in self.data:
-        #     qid = int(self.data["qid"].values[idx])
 
         return {
             "video": video,
@@ -173,6 +172,7 @@ def mc_collate_fn(batch):
 
 def build_mc_dataset(dataset_name, split, args, tokenizer):
     type_map = None
+    is_test = False
     if dataset_name == "how2qa":
         if split == "train":
             csv_path = args.how2qa_train_csv_path
@@ -201,7 +201,8 @@ def build_mc_dataset(dataset_name, split, args, tokenizer):
         elif split == "val":
             csv_path = args.egoSchema_val_csv_path
         elif split == "test":
-            csv_path = args.egoSchema_val_csv_path  # eval on val public
+            csv_path = args.egoSchema_test_csv_path 
+            # is_test = args.create_new_egoSchema_qa 
         else:
             raise NotImplementedError
         subtitles_path = args.egoSchema_subtitles_path
@@ -215,8 +216,10 @@ def build_mc_dataset(dataset_name, split, args, tokenizer):
         max_feats=args.max_feats,
         features_dim=args.features_dim,
         tokenizer=tokenizer,
+        with_atp=args.with_atp,
         use_context=args.use_context,
         prefix=args.prefix,
         suffix=args.suffix,
         type_map=type_map,
+        is_test=is_test,
     )

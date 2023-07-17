@@ -1,7 +1,7 @@
 from .bert import BertForMaskedLM
 from .deberta import DebertaV2ForMaskedLM
-from .gptneo import GPTNeoForCausalLM
-from .gptj import GPTJForCausalLM
+# from .gptneo import GPTNeoForCausalLM
+# from .gptj import GPTJForCausalLM
 from transformers import (
     BertTokenizer,
     DebertaV2Tokenizer,

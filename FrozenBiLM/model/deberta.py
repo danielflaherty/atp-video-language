@@ -138,7 +138,7 @@ class XSoftmax(torch.autograd.Function):
     @staticmethod
     def backward(self, grad_output):
         (output,) = self.saved_tensors
-        inputGrad = _softmax_backward_data(grad_output, output, self.dim, output)
+        inputGrad = _softmax_backward_data(grad_output, output, self.dim, output.dtype)
         return inputGrad, None, None
 
 
@@ -589,7 +589,7 @@ def make_log_bucket_position(relative_pos, bucket_size, max_position):
         np.ceil(np.log(abs_pos / mid) / np.log((max_position - 1) / mid) * (mid - 1))
         + mid
     )
-    bucket_pos = np.where(abs_pos <= mid, relative_pos, log_pos * sign).astype(np.int)
+    bucket_pos = np.where(abs_pos <= mid, relative_pos, log_pos * sign).astype(int)
     return bucket_pos
 
 
@@ -1052,7 +1052,6 @@ class DebertaV2Embeddings(nn.Module):
                     mask = mask.squeeze(1).squeeze(1)
                 mask = mask.unsqueeze(2)
             mask = mask.to(embeddings.dtype)
-
             embeddings = embeddings * mask
 
         embeddings = self.dropout(embeddings)
@@ -1128,7 +1127,7 @@ class DebertaV2Model(DebertaV2PreTrainedModel):
     def __init__(
         self,
         config,
-        max_feats=10,
+        max_feats=60,
         features_dim=768,
         freeze_lm=False,
         ds_factor_attn=8,
@@ -1297,10 +1296,11 @@ class DebertaV2ForMaskedLM(DebertaV2PreTrainedModel):
     def __init__(
         self,
         config,
-        max_feats=90,
+        max_feats=60,
         features_dim=768,
         freeze_lm=True,
         freeze_mlm=True,
+        with_atp=False,
         ds_factor_attn=8,
         ds_factor_ff=8,
         ft_ln=True,
@@ -1324,8 +1324,10 @@ class DebertaV2ForMaskedLM(DebertaV2PreTrainedModel):
         super().__init__(config)
 
         # *** need to change config here ***
-        atp_config = ATPConfig()
-        self.atp_model = ATPSelectorModel(atp_config)
+        self.with_atp = with_atp
+        if with_atp:
+            atp_config = ATPConfig()
+            self.atp_model = ATPSelectorModel(atp_config)
 
         self.deberta = DebertaV2Model(
             config,
@@ -1445,8 +1447,13 @@ class DebertaV2ForMaskedLM(DebertaV2PreTrainedModel):
         )
 
         # NEED TO ACCOUNT FOR VIDEO_MASK
-        video, *out_masks = self.atp_model(video, None, None)
-        video = video.permute(1, 0, 2)
+        if self.with_atp:
+            video, *out_masks = self.atp_model(video, None, None)
+            video = video.permute(1, 0, 2)
+            lengths = video.size(1)
+            video_mask =  1 * (torch.arange(50).unsqueeze(1) < lengths).transpose(0, 1)
+            video_mask = video_mask.to(video.device)
+
 
         outputs = self.deberta(
             input_ids,

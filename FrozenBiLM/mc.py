@@ -1,10 +1,13 @@
 import os
+import csv
 import torch
 import torch.nn.functional as F
 import numpy as np
 import random
+from tqdm import tqdm
 import json
 import math
+import re
 import sys
 from typing import Iterable
 import argparse
@@ -43,7 +46,6 @@ def train_one_epoch(
         video = batch_dict["video"].to(device)
         video_len = batch_dict["video_len"]
         video_mask = get_mask(video_len, video.size(1)).to(device)
-
         text = batch_dict["text"]
         logits_list = []
         for aid in range(len(text)):  # one forward per answer candidate id
@@ -121,6 +123,108 @@ def train_one_epoch(
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
+@torch.no_grad()
+def get_top_k_ans(model, tokenizer, dataset, device, args, k=5):
+    model.eval()
+    rows = []
+
+    # Set up CSV of new QAW
+    csv_file = args.new_egoSchema_qa_path
+    headers = ["question", "correct_answer", "wrong_answer_1", "wrong_answer_2", "wrong_answer_3", "wrong_answer_4"]
+    with open(csv_file, 'w', newline='') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=headers)
+        writer.writeheader()
+        csvfile.close()
+
+    # Iterate through dataset 1 Question at a time
+    for i in tqdm(range(617, len(dataset))):
+        vid_text = dataset[i]
+        video = vid_text["video"].unsqueeze(0)
+        video_len = vid_text["video_len"]
+
+        # MIGHT NEED TO FIX THIS
+        video_mask = get_mask(video_len, video.size(1)).to(device)
+        ###
+
+        text = vid_text["text"]
+
+        # Iterate through all question-answer pairs for a given question (includes all correct and all wrong answers)
+        logits_list = []
+        
+        for j in range(0, len(text), args.batch_size_val):
+            qa = text[j : j + args.batch_size_val]
+            video = torch.cat(len(qa) * [video])
+            video_mask = torch.cat(len(qa) * [video_mask])
+            encoded = tokenizer(
+                qa,
+                add_special_tokens=True,
+                max_length=args.max_tokens,
+                padding="longest",
+                truncation=True,
+                return_tensors="pt",
+            )
+            # forward
+            output = model(
+                video=video.to(device),
+                video_mask=video_mask.to(device),
+                input_ids=encoded["input_ids"].to(device),
+                attention_mask=encoded["attention_mask"].to(device),
+            )
+            # Get logits for mask token
+            logits = output["logits"]
+            input_ids = encoded["input_ids"]
+            delay = args.max_feats if args.use_video else 0
+            logits = logits[:, delay : input_ids.size(1) + delay][input_ids == tokenizer.mask_token_id][:, 0]
+            logits_list.extend(logits.flatten().tolist())
+
+        # Regex pattern for question & answer extraction
+        pattern = r".*Question: (.*?) Is it '(.*?)'\?"
+
+        # get top k answers corresponding to the question
+        logits_list = torch.tensor(logits_list)
+        _, top_k_indices = torch.topk(logits_list, k)
+        answers = []
+        for j in top_k_indices:
+            q_a = text[j]
+            # extract out answer
+            match = re.search(pattern, q_a)
+            answers.append(match.group(2))
+
+        # get correct answer & question
+        answer_idx = vid_text["answer_id"]
+        correct_q_a = text[answer_idx]
+        match_correct = re.search(pattern, correct_q_a)
+        question = match_correct.group(1)
+        correct_answer = match_correct.group(2)
+
+        # Check if correct answer is in top k
+        correct_in_top_k = -1
+        for j in range(len(answers)):
+            if answers[j] == correct_answer:
+                correct_in_top_k = j
+        if correct_in_top_k == -1:
+            answers = answers[:-1]
+        else:
+            answers.pop(correct_in_top_k)
+        random.shuffle(answers)
+
+        rows.append([question, correct_answer] + answers)
+
+        # Save questions + new answers to CSV 
+        with open(csv_file, 'w', newline='') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=headers)
+
+            # Writing the rows
+            for row in rows:
+                writer.writerow({
+                    'question': row[0],
+                    'correct_answer': row[1],
+                    'wrong_answer_1': row[2],
+                    'wrong_answer_2': row[3],
+                    'wrong_answer_3': row[4],
+                    'wrong_answer_4': row[5],
+                })
+            csvfile.close()
 
 @torch.no_grad()
 def evaluate(
@@ -496,6 +600,9 @@ def main(args):
             type_map=item.dataloader_test.dataset.type_map,
             split="val" if (args.eval and not args.test) else "test",
         )
+
+        # Creates new dataset
+        # get_top_k_ans(model, tokenizer, dataset_test, device, args)
 
         if args.save_dir and dist.is_main_process():
             json.dump(

@@ -37,6 +37,15 @@ def get_args_parser():
         required=True,
     )
     parser.add_argument(
+        "--create_new_egoSchema_qa",
+        action="store_true",
+        help="whether or not to create new wrong answers for egoSchema",
+    )
+    parser.add_argument(
+        "--new_egoSchema_qa_path",
+        default="/home/danielflaherty/atp-video-language/data/egoSchema/new_qa_4.csv"
+    )
+    parser.add_argument(
         "--egoSchema_features_path",
         default="/home/danielflaherty/atp-video-language/data/vid_frame_embs/"
     )
@@ -56,25 +65,29 @@ def get_args_parser():
         "--lsmdc_features_path",
         default=os.path.join(DATA_DIR, name2folder["lsmdc"], "clipvitl14.pth"),
     )
+
+    """
+    PUT PATHS FROM egoSchema train, val, & test here
+    """
     parser.add_argument(
         "--egoSchema_train_csv_path",
-        default="/home/danielflaherty/atp-video-language/data/ecoSchema/egoSchema_train.csv",
+        default="/home/danielflaherty/atp-video-language/data/egoSchema/new_mixed_data/p2_old_450_p3_450_train.csv",
     )
     parser.add_argument(
         "--egoSchema_val_csv_path",
-        default="/home/danielflaherty/atp-video-language/data/ecoSchema/egoSchema_val.csv",
+        default="/home/danielflaherty/atp-video-language/data/egoSchema/prompt1_old_gpt-4.csv",
     )
-    # CURRENT HAVE VAL = TEST, NEED TO CHANGE
     parser.add_argument(
         "--egoSchema_test_csv_path",
-        default="/home/danielflaherty/atp-video-language/data/ecoSchema/egoSchema_val.csv",
+        default="/home/danielflaherty/atp-video-language/data/egoSchema/prompt1_old_gpt-4.csv",
     )
+
+
     # Dummy arg since no subtitles are used w/ egoSchema
     parser.add_argument(
         "--egoSchema_subtitles_path",
         default="",
     )
-    # MAYBE ADD VOCAB FOR EGOSCHEMA ???
     parser.add_argument(
         "--lsmdc_train_csv_path",
         default=os.path.join(DATA_DIR, name2folder["lsmdc"], "training.csv"),
@@ -432,7 +445,7 @@ def get_args_parser():
     parser.add_argument(
         "--max_feats",
         type=int,
-        default=90,
+        default=10,
         help="maximum number of video features considered, one per frame",
     )
     parser.add_argument(
@@ -446,6 +459,11 @@ def get_args_parser():
         dest="use_video",
         action="store_false",
         help="disables usage of video",
+    )
+    parser.add_argument(
+        "--with_atp",
+        action="store_true",
+        help="selects best frames to use in model"
     )
     parser.add_argument(
         "--no_context",

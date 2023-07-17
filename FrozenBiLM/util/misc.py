@@ -5,8 +5,11 @@ import random
 
 def get_mask(lengths, max_length):
     """Computes a batch of padding masks given batched lengths"""
+    # mask = 1 * (
+    #     torch.arange(max_length).unsqueeze(1).to(lengths.device) < lengths
+    # ).transpose(0, 1)
     mask = 1 * (
-        torch.arange(max_length).unsqueeze(1).to(lengths.device) < lengths
+        torch.arange(max_length).unsqueeze(1) < lengths
     ).transpose(0, 1)
     return mask
 
